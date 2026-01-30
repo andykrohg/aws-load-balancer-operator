@@ -130,8 +130,13 @@ manifests: ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefin
 	hack/sync-upstream-rbac.sh
 
 .PHONY: generate
+ifeq ($(REGION),govcloud)
+generate: iamctl-gen-govcloud iam-gen-govcloud## Generate code containing DeepCopy, DeepCopyInto, DeepCopyObject method implementations and iamctl policies.
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+else
 generate: iamctl-gen iam-gen## Generate code containing DeepCopy, DeepCopyInto, DeepCopyObject method implementations and iamctl policies.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+endif
 
 .PHONY: update-vendored-crds
 update-vendored-crds:
@@ -165,6 +170,26 @@ iamctl-gen: iamctl-build iam-gen
 	go fmt -mod=vendor ./pkg/operator/$(IAMCTL_OUTPUT_FILE)
 	go vet -mod=vendor ./pkg/operator/$(IAMCTL_OUTPUT_FILE)
 
+.PHONY: iamctl-gen-govcloud
+iamctl-gen-govcloud: iamctl-build iam-gen-govcloud
+	# generate controller's IAM policy without minify.
+	@# This policy is for STS clusters as it's turned into a role inline policy which is limited to 10240 by AWS.
+	$(IAMCTL_BINARY) -i $(IAMCTL_ASSETS_DIR)/iam-policy-govcloud.json -o $(IAMCTL_OUTPUT_DIR)/$(IAMCTL_OUTPUT_FILE) -p $(IAMCTL_GO_PACKAGE) -c $(IAMCTL_OUTPUT_CR_FILE) -n -s
+
+	# generate controller's IAM policy with minify.
+	@# This policy is for non STS clusters as it's turned into a user inline policy which is limited to 2048 by AWS.
+	$(IAMCTL_BINARY) -i $(IAMCTL_ASSETS_DIR)/iam-policy-govcloud.json -o $(IAMCTL_OUTPUT_DIR)/$(IAMCTL_OUTPUT_MINIFY_FILE) -p $(IAMCTL_GO_PACKAGE) -f GetIAMPolicyMinify  -c $(IAMCTL_OUTPUT_MINIFY_CR_FILE)
+
+
+	go fmt -mod=vendor $(IAMCTL_OUTPUT_DIR)/$(IAMCTL_OUTPUT_FILE) $(IAMCTL_OUTPUT_DIR)/$(IAMCTL_OUTPUT_MINIFY_FILE)
+	go vet -mod=vendor $(IAMCTL_OUTPUT_DIR)/$(IAMCTL_OUTPUT_FILE) $(IAMCTL_OUTPUT_DIR)/$(IAMCTL_OUTPUT_MINIFY_FILE)
+
+	# generate operator's IAM policy.
+	@# The operator's policy is small enough to fit into both limits: inline and role.
+	$(IAMCTL_BINARY) -i $(IAMCTL_ASSETS_DIR)/operator-iam-policy-govcloud.json -o ./pkg/operator/$(IAMCTL_OUTPUT_FILE) -p operator -n
+	go fmt -mod=vendor ./pkg/operator/$(IAMCTL_OUTPUT_FILE)
+	go vet -mod=vendor ./pkg/operator/$(IAMCTL_OUTPUT_FILE)
+
 # The operator's CredentialsRequest is the source of truth for the operator's IAM policy.
 # It's required to generate IAM role for STS clusters using ccoctl (docs/prerequisites.md#option-1-using-ccoctl).
 # The below rule generates a corresponding AWS IAM policy JSON which can be used in AWS CLI commands (docs/prerequisites.md#option-2-using-the-aws-cli).
@@ -173,6 +198,13 @@ iamctl-gen: iamctl-build iam-gen
 iam-gen:
 	./hack/generate-iam-from-credrequest.sh ./hack/operator-credentials-request.yaml ./hack/operator-permission-policy.json
 	cp ./hack/operator-permission-policy.json $(IAMCTL_ASSETS_DIR)/operator-iam-policy.json
+
+
+.PHONY: iam-gen-govcloud
+iam-gen-govcloud:
+	./hack/generate-iam-from-credrequest.sh ./hack/operator-credentials-request-govcloud.yaml ./hack/operator-permission-policy-govcloud.json
+	cp ./hack/operator-permission-policy-govcloud.json $(IAMCTL_ASSETS_DIR)/operator-iam-policy-govcloud.json
+
 
 ENVTEST_K8S_VERSION ?= 1.33.0
 ENVTEST_ASSETS_DIR ?= $(shell pwd)/bin
